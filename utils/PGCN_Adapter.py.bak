@@ -1,0 +1,138 @@
+"""
+PGCN Adapter for LibEER Framework
+
+This adapter wraps the reference PGCN implementation to work with LibEER's training pipeline.
+It handles:
+- Adjacency matrix and coordinate initialization (SEED-specific)
+- Model construction with proper args namespace
+- LibEER-compatible forward interface
+"""
+
+import sys
+from pathlib import Path
+import torch
+import torch.nn as nn
+from types import SimpleNamespace
+
+# Import reference PGCN modules
+# Add Reference PGCN directory to path for absolute imports
+_proj_root = Path(__file__).resolve().parents[2]  # /home/ako/Project/work
+_ref_root = _proj_root / 'Reference' / 'PGCN' / 'PGCN'
+if str(_ref_root) not in sys.path:
+    sys.path.insert(0, str(_ref_root))
+
+try:
+    # Use absolute imports (works with both runtime and Pylance)
+    from model_PGCN import PGCN as RefPGCN
+    from node_location import convert_dis_m, get_ini_dis_m, return_coordinates
+    from torch.nn.parameter import Parameter
+except ImportError as e:
+    print(f"[PGCN_Adapter] Warning: Could not import reference PGCN: {e}")
+    RefPGCN = None
+
+
+class PGCN(nn.Module):
+    """
+    LibEER-compatible adapter for PGCN model.
+    
+    Args:
+        num_electrodes: Number of EEG channels (typically 62 for SEED)
+        in_channels: Number of input features per electrode (typically 5 for frequency bands)
+        num_classes: Number of emotion classes (3 for SEED, 4 for SEED-IV)
+        dropout_rate: Dropout probability (default 0.4 as in paper)
+        epsilon: Label smoothing parameter (not used in forward, kept for compatibility)
+        beta: Learning rate for adjacency matrix (not used here, handled by optimizer)
+        dataset: Dataset name ('SEED', 'SEED4', etc.)
+        coordinates: Optional custom electrode coordinates (if not using SEED layout)
+    """
+    
+    def __init__(self, num_electrodes, in_channels, num_classes, 
+                 dropout_rate=0.4, epsilon=0.05, beta=5e-5,
+                 dataset='SEED', coordinates=None):
+        super(PGCN, self).__init__()
+        
+        if RefPGCN is None:
+            raise RuntimeError("Reference PGCN model not available. Check import paths.")
+        
+        self.num_electrodes = num_electrodes
+        self.in_channels = in_channels
+        self.num_classes = num_classes
+        self.dataset = dataset
+        
+        # Build args namespace matching reference PGCN expectations
+        self.args = SimpleNamespace(
+            in_feature=in_channels,
+            out_feature=20,  # Output feature dimension from paper
+            n_class=num_classes,
+            dropout=dropout_rate,
+            epsilon=epsilon,
+            dataset=dataset,
+            device='cuda',  # Will be moved to correct device by LibEER
+            lr=0.1,  # LeakyReLU negative slope (not learning rate!)
+            module=""  # Track which modules are used (modified during forward)
+        )
+        
+        # Initialize adjacency matrix (SEED-specific layout with delta=9)
+        # This is learnable and will be updated during training
+        initial_adj = convert_dis_m(get_ini_dis_m(), delta=9)
+        self.adj = Parameter(torch.FloatTensor(initial_adj))
+        
+        # Initialize coordinate matrix (SEED electrode positions)
+        # Register as buffer so it automatically moves with model.to(device)
+        coords = return_coordinates() if coordinates is None else coordinates
+        self.register_buffer('coordinates', torch.FloatTensor(coords))
+        
+        # Build the reference PGCN model
+        self.model = RefPGCN(self.args, self.adj, self.coordinates)
+    
+    def _apply(self, fn):
+        """
+        Override _apply to ensure coordinates in reference model follow device changes.
+        This is called by .to(), .cuda(), .cpu() etc.
+        """
+        super()._apply(fn)
+        
+        # Apply fn to coordinates and update all references in the model
+        if hasattr(self, 'coordinates'):
+            self.coordinates = fn(self.coordinates)
+            
+            # Update reference model's coordinate references
+            if hasattr(self, 'model'):
+                self.model.coordinate = self.coordinates
+                # Update meso layers (critical for PGCN!)
+                if hasattr(self.model, 'meso_layer_1'):
+                    self.model.meso_layer_1.coordinate = self.coordinates
+                if hasattr(self.model, 'meso_layer_2'):
+                    self.model.meso_layer_2.coordinate = self.coordinates
+        
+        return self
+        
+    def forward(self, x):
+        """
+        Forward pass compatible with LibEER training loop.
+        
+        Args:
+            x: Input tensor of shape (batch, num_electrodes, in_channels)
+               For SEED with DE features: (batch, 62, 5)
+        
+        Returns:
+            logits: Output tensor of shape (batch, num_classes)
+        """
+        # Call reference PGCN forward
+        # coordinates are kept in sync via _apply hook
+        # It returns (output, laplacian, fused_features)
+        # We only need the output (logits) for LibEER's training loop
+        output, _, _ = self.model(x)
+        return output
+
+
+# Auto-register with LibEER if Models registry is available
+try:
+    from LibEER.models import Models
+    if hasattr(Models, 'Model'):
+        Models.Model['PGCN'] = PGCN
+        print("[PGCN_Adapter] Successfully registered PGCN in LibEER.models.Models")
+except ImportError:
+    print("[PGCN_Adapter] LibEER.models not available, skipping auto-registration")
+except Exception as e:
+    print(f"[PGCN_Adapter] Could not auto-register: {e}")
