@@ -38,7 +38,7 @@ except ImportError:
     WARMUP_AVAILABLE = False
 
 # Import PGCN model and utilities
-from EEG.models.PGCN import PGCN, convert_dis_m, get_ini_dis_m, return_coordinates
+from EEG.models.PGCN import PGCN, convert_dis_m, get_ini_dis_m, return_coordinates, CE_Label_Smooth_Loss
 
 # Import LibEER framework
 from LibEER.config.setting import preset_setting, set_setting_by_args
@@ -48,39 +48,6 @@ from LibEER.utils.args import get_args_parser
 from LibEER.utils.store import make_output_dir
 from LibEER.utils.utils import state_log, result_log, setup_seed, sub_result_log
 from LibEER.Trainer.training import train
-
-
-class CE_Label_Smooth_Loss(torch.nn.Module):
-    """Label smoothing loss from original PGCN paper."""
-    def __init__(self, classes, epsilon=0.1):
-        super(CE_Label_Smooth_Loss, self).__init__()
-        self.classes = classes
-        self.epsilon = epsilon
-
-    def forward(self, input, target):
-        """
-        Args:
-            input: (batch_size, num_classes) - logits
-            target: (batch_size,) - class indices (already converted from one-hot in Trainer)
-        """
-        # Ensure target is 1D long tensor
-        target = target.long()
-        if target.dim() > 1:
-            target = target.squeeze(-1)
-        
-        # Compute log probabilities
-        log_prob = torch.nn.functional.log_softmax(input, dim=-1)
-        
-        # Create weight matrix for label smoothing
-        weight = input.new_ones(input.size()) * (self.epsilon / (self.classes - 1.))
-        
-        # Scatter the correct class weight (1 - epsilon)
-        weight.scatter_(-1, target.unsqueeze(-1), (1. - self.epsilon))
-        
-        # Compute loss
-        loss = (-weight * log_prob).sum(dim=-1).mean()
-        return loss
-
 
 def train_one_subject(args, data, label, train_indexes, test_indexes, val_indexes,
                       model, optimizer, scheduler, warmup_scheduler, criterion, device, output_dir):

@@ -1,0 +1,7 @@
+result/
+docs/
+log/
+.env
+__pycache__
+.vscode
+back/

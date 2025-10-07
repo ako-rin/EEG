@@ -181,7 +181,8 @@ class Trainer(object):
                 local_params += [p]
             else :
                 weight_params += [p]
-
+        for n, p in model.named_parameters():
+            print(n, p.shape, p.requires_grad)
         optimizer = optim.AdamW([
             {'params': lap_params, 'lr': self.args.beta},
             {'params': local_params, 'lr': self.args.lr},

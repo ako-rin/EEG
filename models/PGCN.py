@@ -379,6 +379,36 @@ class MesoLayer(nn.Module):
             return subgraph_2
         else:
             return [62]  # 默认整张图
+class CE_Label_Smooth_Loss(nn.Module):
+    """Label smoothing loss from original PGCN paper."""
+    def __init__(self, classes, epsilon=0.1):
+        super(CE_Label_Smooth_Loss, self).__init__()
+        self.classes = classes
+        self.epsilon = epsilon
+
+    def forward(self, input, target):
+        """
+        Args:
+            input: (batch_size, num_classes) - logits
+            target: (batch_size,) - class indices (already converted from one-hot in Trainer)
+        """
+        # Ensure target is 1D long tensor
+        target = target.long()
+        if target.dim() > 1:
+            target = target.squeeze(-1)
+        
+        # Compute log probabilities
+        log_prob = torch.nn.functional.log_softmax(input, dim=-1)
+        
+        # Create weight matrix for label smoothing
+        weight = input.new_ones(input.size()) * (self.epsilon / (self.classes - 1.))
+        
+        # Scatter the correct class weight (1 - epsilon)
+        weight.scatter_(-1, target.unsqueeze(-1), (1. - self.epsilon))
+        
+        # Compute loss
+        loss = (-weight * log_prob).sum(dim=-1).mean()
+        return loss
 class PGCN(nn.Module):
     """
     组合 LocalLayer, MesoLayer, GlobalLayer,
@@ -400,6 +430,7 @@ class PGCN(nn.Module):
         self.nclass = args.n_class
         self.dropout = args.dropout
         self.l_relu  = args.lr
+        local_adj = nn.Parameter(local_adj.float())
         self.adj     = local_adj
         self.coordinate = coor
 
